@@ -1,8 +1,11 @@
 package xeger
 
 import (
+	"fmt"
 	"math/rand"
+	"regexp"
 	"regexp/syntax"
+	"strconv"
 	"time"
 )
 
@@ -16,6 +19,7 @@ const (
 	newline         = "\n"
 	printable       = digits + ascii_letters + punctuation + control + newline
 	printableNotNL  = digits + ascii_letters + punctuation + control
+	printableNotControl = digits + ascii_letters + punctuation + newline
 )
 
 var src = rand.NewSource(time.Now().UnixNano())
@@ -24,6 +28,7 @@ const limit = 10
 
 type Xeger struct {
 	re *syntax.Regexp
+	groups map[int]string
 }
 
 func NewXeger(regex string) (*Xeger, error) {
@@ -32,7 +37,7 @@ func NewXeger(regex string) (*Xeger, error) {
 		return nil, err
 	}
 
-	x := &Xeger{re}
+	x := &Xeger{re: re, groups: make(map[int]string)}
 	return x, nil
 }
 
@@ -44,21 +49,64 @@ func (x *Xeger) Generate() string {
 func (x *Xeger) generateFromRegexp(re *syntax.Regexp) string {
 	switch re.Op {
 	case syntax.OpLiteral: // matches Runes sequence
-		return string(re.Rune)
+		// Строка из re.Rune
+		s := string(re.Rune)
 
-	case syntax.OpCharClass: // matches Runes interpreted as range pair list
-		sum := 0
-		for i := 0; i < len(re.Rune); i += 2 {
-			sum += 1 + int(re.Rune[i+1]-re.Rune[i])
+		// Регулярное выражение для проверки строки вида <g\d+>
+		rgx, err := regexp.Compile(`<g(\d+)>`)
+		if err != nil {
+			panic(fmt.Sprintf("ошибка при компиляции регулярного выражения: %v", err))
 		}
 
-		index := rune(randInt(sum))
-		for i := 0; i < len(re.Rune); i += 2 {
-			delta := re.Rune[i+1] - re.Rune[i]
-			if index <= delta {
-				return string(rune(re.Rune[i] + index))
+		// Если строка соответствует шаблону <g\d+>
+		if rgx.MatchString(s) {
+			// Найти индекс группы
+			matches := rgx.FindStringSubmatch(s)
+			index, err := strconv.Atoi(matches[1])
+			if err != nil {
+				panic(fmt.Sprintf("ошибка при преобразовании индекса группы: %v", err))
 			}
-			index -= delta + 1
+
+			// Заменить строку значением из массива groups по индексу \d+
+			if val, ok := x.groups[index]; ok {
+				return val
+			} else {
+				// Если \d+ больше чем элементов в groups, заменить на octal \d+
+				if index > len(x.groups) {
+					octal, err := strconv.ParseInt(matches[1], 8, 32)
+					if err != nil {
+						panic(fmt.Sprintf("ошибка при преобразовании octal: %v", err))
+					}
+					return string(rune(octal))
+				} else {
+					return ""
+				}
+			}
+		}
+
+		return s
+
+	case syntax.OpCharClass: // matches Runes interpreted as range pair list
+		var filtered []rune
+		if re.Flags&syntax.FoldCase != 0 {
+			// If it is a negated character class
+			for _, r := range printableNotControl {
+				if !isInRanges(r, re.Rune) {
+					filtered = append(filtered, r)
+				}
+			}
+		} else {
+			// If it is a regular character class
+			for _, r := range printableNotControl {
+				if isInRanges(r, re.Rune) {
+					filtered = append(filtered, r)
+				}
+			}
+		}
+
+		if len(filtered) > 0 {
+			candidate := filtered[randInt(len(filtered))]
+			return string(candidate)
 		}
 		return ""
 
@@ -71,7 +119,9 @@ func (x *Xeger) generateFromRegexp(re *syntax.Regexp) string {
 		return string([]byte{c})
 
 	case syntax.OpCapture: // capturing subexpression with index Cap, optional name Name
-		return x.generateFromSubexpression(re, 1)
+		generated := x.generateFromSubexpression(re, 1)
+		x.groups[re.Cap] = generated
+		return generated
 
 	case syntax.OpStar: // matches Sub[0] zero or more times
 		return x.generateFromSubexpression(re, randInt(limit+1))
@@ -131,4 +181,17 @@ func (x *Xeger) generateFromSubexpression(re *syntax.Regexp, count int) string {
 // generates strings at random.
 func randInt(n int) int {
 	return int(src.Int63() % int64(n))
+}
+
+func isASCII(r rune) bool {
+	return r >= 0 && r <= 127
+}
+
+func isInRanges(r rune, ranges []rune) bool {
+	for i := 0; i < len(ranges); i += 2 {
+		if r >= ranges[i] && r <= ranges[i+1] {
+			return true
+		}
+	}
+	return false
 }
